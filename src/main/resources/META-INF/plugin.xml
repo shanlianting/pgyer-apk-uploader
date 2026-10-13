@@ -1,0 +1,61 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <id>com.pgyer.ide.apkuploader</id>
+    <name>Pgyer APK Uploader</name>
+    <vendor url="https://www.pgyer.com">Pgyer Community Plugin</vendor>
+
+    <description><![CDATA[
+        <p>Upload Android APK files to <a href="https://www.pgyer.com">Pgyer (蒲公英)</a> from Android Studio / IntelliJ IDEA.</p>
+        <ul>
+          <li>Select an APK or detect recent Gradle build outputs</li>
+          <li>Configure API Key in IDE settings (stored in PasswordSafe)</li>
+          <li>Set install type, password, and update description</li>
+          <li>Progress feedback and install-page link on success</li>
+        </ul>
+    ]]></description>
+
+    <change-notes><![CDATA[
+        <b>1.0.0</b>
+        <ul>
+          <li>Initial release: APK upload via Pgyer API 2.0 (getCOSToken + COS upload + buildInfo)</li>
+          <li>Settings page, tool window, and Tools menu action</li>
+        </ul>
+    ]]></change-notes>
+
+    <!-- Compatible with IntelliJ IDEA and Android Studio (Platform APIs only) -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <resource-bundle>messages.PgyerBundle</resource-bundle>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationConfigurable
+                parentId="tools"
+                instance="com.pgyer.ide.apkuploader.settings.PgyerConfigurable"
+                id="com.pgyer.ide.apkuploader.settings"
+                displayName="Pgyer APK Uploader"/>
+        <notificationGroup id="Pgyer APK Uploader"
+                           displayType="BALLOON"
+                           key="notification.group"/>
+        <toolWindow id="Pgyer Upload"
+                    anchor="right"
+                    icon="AllIcons.Actions.Upload"
+                    factoryClass="com.pgyer.ide.apkuploader.ui.PgyerToolWindowFactory"/>
+    </extensions>
+
+    <actions>
+        <action id="com.pgyer.ide.apkuploader.UploadApkAction"
+                class="com.pgyer.ide.apkuploader.actions.UploadApkAction"
+                text="Upload APK to Pgyer"
+                description="Upload an APK file to Pgyer (蒲公英)"
+                icon="AllIcons.Actions.Upload">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+        </action>
+        <action id="com.pgyer.ide.apkuploader.OpenSettingsAction"
+                class="com.pgyer.ide.apkuploader.actions.OpenPgyerSettingsAction"
+                text="Pgyer Settings..."
+                description="Open Pgyer APK Uploader settings">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
