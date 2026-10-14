@@ -189,7 +189,6 @@ class PgyerApiClient(
                     .version(HttpClient.Version.HTTP_1_1)
                     .timeout(Duration.ofSeconds(30))
                     .header("User-Agent", USER_AGENT)
-                    .header("Connection", "close")
                     .GET()
                     .build()
                 val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
@@ -263,13 +262,13 @@ class PgyerApiClient(
         for (host in apiHosts) {
             try {
                 val url = "https://$host$path"
+                // Note: java.net.http.HttpClient forbids restricted headers like "Connection".
                 val request = HttpRequest.newBuilder(URI.create(url))
                     .version(HttpClient.Version.HTTP_1_1)
                     .timeout(Duration.ofMinutes(2))
                     .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
                     .header("User-Agent", USER_AGENT)
                     .header("Accept", "application/json")
-                    .header("Connection", "close")
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build()
                 val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
@@ -384,6 +383,10 @@ class PgyerApiClient(
             } catch (e: CosUploadException) {
                 throw e
             } catch (e: Exception) {
+                // Avoid "Failed during X: Failed during X: ..." double wrapping.
+                if (e is IOException && e.message?.startsWith("Failed during ") == true) {
+                    throw e
+                }
                 last = e
                 if (index < maxAttempts - 1 && isTransientNetworkError(e)) {
                     rotateApiHost()
