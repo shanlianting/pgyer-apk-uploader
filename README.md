@@ -35,16 +35,30 @@
 
 ## 构建与在 Android Studio 中运行
 
-### 环境要求
+### 环境要求（务必对齐）
 
-- JDK **17+**
-- Android Studio 或 IntelliJ IDEA（建议 2024.3+）
-- 网络可访问 `www.pgyer.com` 与其返回的 COS 上传地址
+| 组件 | 要求 |
+| --- | --- |
+| **运行 Gradle 的 JDK** | **17 或 21（推荐 21）** |
+| Gradle Wrapper | **9.0.0**（由仓库自带，勿用本机旧 Gradle） |
+| IntelliJ Platform Gradle Plugin | **2.19.0** |
+| 编译 toolchain | JDK **17**（`jvmToolchain(17)`） |
+| IDE | Android Studio / IntelliJ IDEA（建议 2024.3+） |
+
+> **常见错误**：`Type T not present` / `Could not create task ':test'`  
+> 原因几乎都是用 **JDK 24+** 跑 **Gradle 8.x**，或 Plugin / Gradle 版本不匹配。  
+> 处理：安装 JDK 21，并让 IDE 的 **Gradle JVM** 指向它；或设置  
+> `export JAVA_HOME=$(/usr/libexec/java_home -v 21)`（macOS）后执行 `./gradlew …`。  
+> 仓库已通过 `gradle/gradle-daemon-jvm.properties` 将 Daemon 固定为 **toolchain 21**。
 
 ### 用 Gradle 构建
 
 ```bash
-./gradlew buildPlugin
+# 确认 Gradle JVM 为 17/21
+java -version
+./gradlew --version
+
+./gradlew test buildPlugin
 ```
 
 产物：`build/distributions/pgyer-apk-uploader-*.zip`
@@ -131,16 +145,28 @@ Uses Pgyer fast upload: `getCOSToken` → COS upload → poll `buildInfo`. Docs:
 
 ## Build & run in Android Studio
 
-### Requirements
+### Requirements (keep these aligned)
 
-- JDK **17+**
-- Android Studio or IntelliJ IDEA (2024.3+ recommended)
-- Network access to `www.pgyer.com` and the returned COS endpoint
+| Component | Required |
+| --- | --- |
+| **JDK used to run Gradle** | **17 or 21 (21 recommended)** |
+| Gradle Wrapper | **9.0.0** (use `./gradlew`, not a system Gradle) |
+| IntelliJ Platform Gradle Plugin | **2.19.0** |
+| Compile toolchain | JDK **17** (`jvmToolchain(17)`) |
+| IDE | Android Studio / IntelliJ IDEA (2024.3+ recommended) |
+
+> **Common failure**: `Type T not present` / `Could not create task ':test'`  
+> Almost always means **JDK 24+** is running **Gradle 8.x**, or plugin/Gradle versions are mismatched.  
+> Fix: install JDK 21 and point the IDE **Gradle JVM** at it (or set `JAVA_HOME` to JDK 21) before `./gradlew …`.  
+> This repo pins the Gradle Daemon via `gradle/gradle-daemon-jvm.properties` (`toolchainVersion=21`).
 
 ### Build the plugin zip
 
 ```bash
-./gradlew buildPlugin
+java -version
+./gradlew --version
+
+./gradlew test buildPlugin
 ```
 
 Output: `build/distributions/pgyer-apk-uploader-*.zip`

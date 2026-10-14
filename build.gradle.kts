@@ -1,3 +1,5 @@
+import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+
 plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm")
@@ -7,8 +9,15 @@ plugins {
 group = providers.gradleProperty("pluginGroup").get()
 version = providers.gradleProperty("pluginVersion").get()
 
+// Compile/test against JDK 17 (required by IntelliJ Platform 2024.3+)
 kotlin {
     jvmToolchain(17)
+}
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(17))
+    }
 }
 
 repositories {
@@ -20,10 +29,9 @@ repositories {
 
 dependencies {
     intellijPlatform {
-        // Target a recent IntelliJ Platform build; the plugin uses only Platform APIs
-        // so it also runs in Android Studio.
+        // Platform APIs only — works in Android Studio as well as IntelliJ IDEA.
         intellijIdeaCommunity("2024.3.5")
-        testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
+        testFramework(TestFrameworkType.Platform)
     }
 
     implementation("com.google.code.gson:gson:2.11.0")
@@ -54,6 +62,6 @@ intellijPlatform {
 
 tasks {
     wrapper {
-        gradleVersion = "8.13"
+        gradleVersion = providers.gradleProperty("gradleVersion").get()
     }
 }
