@@ -2,10 +2,9 @@ package com.pgyer.ide.apkuploader.upload
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
-import java.io.ByteArrayInputStream
 import java.io.IOException
-import java.io.InputStream
-import java.io.SequenceInputStream
+import java.io.OutputStream
+import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -15,9 +14,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
-import java.util.Collections
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Pgyer API 2.0 fast upload client.
@@ -28,17 +25,27 @@ import java.util.concurrent.atomic.AtomicLong
  * 3. poll GET /apiv2/app/buildInfo until published
  *
  * Docs: https://www.pgyer.com/doc/view/api_upload
+ *
+ * Note: COS uploads use [HttpURLConnection] with a known Content-Length.
+ * Java [HttpClient] `ofInputStream` uses chunked transfer encoding, which
+ * Tencent COS often rejects by closing the socket — surfacing as
+ * "HTTP/1.1 header parser received no bytes".
  */
 class PgyerApiClient(
-    private val apiHost: String = DEFAULT_HOST,
-    private val httpClient: HttpClient = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(30))
-        .followRedirects(HttpClient.Redirect.NORMAL)
-        .build(),
+    private val apiHosts: List<String> = DEFAULT_API_HOSTS,
 ) {
     fun interface ProgressListener {
         fun onProgress(progress: UploadProgress)
     }
+
+    private val httpClient: HttpClient = HttpClient.newBuilder()
+        .version(HttpClient.Version.HTTP_1_1)
+        .connectTimeout(Duration.ofSeconds(30))
+        .followRedirects(HttpClient.Redirect.NORMAL)
+        .build()
+
+    @Volatile
+    private var activeApiHost: String = apiHosts.first()
 
     fun upload(params: PgyerUploadParams, listener: ProgressListener = ProgressListener { }): PgyerUploadResult {
         require(params.apiKey.isNotBlank()) { "API Key is required" }
@@ -50,7 +57,9 @@ class PgyerApiClient(
         listener.onProgress(
             UploadProgress(UploadProgress.Stage.TOKEN, "Requesting upload token...", 0.05)
         )
-        val token = getCosToken(params)
+        val token = withRetry(stage = "getCOSToken") {
+            getCosToken(params)
+        }
 
         listener.onProgress(
             UploadProgress(
@@ -59,18 +68,19 @@ class PgyerApiClient(
                 0.12,
             )
         )
-        uploadToCos(params.apkPath, token) { uploaded, total ->
-            val fileFraction = if (total > 0) uploaded.toDouble() / total.toDouble() else 0.0
-            // Map file bytes onto 12%..75% of overall progress
-            val overall = 0.12 + fileFraction * 0.63
-            val pct = (fileFraction * 100).toInt()
-            listener.onProgress(
-                UploadProgress(
-                    UploadProgress.Stage.UPLOAD,
-                    "Uploading ${params.apkPath.fileName}… $pct%",
-                    overall,
+        withRetry(stage = "COS upload", maxAttempts = 2) {
+            uploadToCos(params.apkPath, token) { uploaded, total ->
+                val fileFraction = if (total > 0) uploaded.toDouble() / total.toDouble() else 0.0
+                val overall = 0.12 + fileFraction * 0.63
+                val pct = (fileFraction * 100).toInt()
+                listener.onProgress(
+                    UploadProgress(
+                        UploadProgress.Stage.UPLOAD,
+                        "Uploading ${params.apkPath.fileName}… $pct%",
+                        overall,
+                    )
                 )
-            )
+            }
         }
 
         listener.onProgress(
@@ -103,7 +113,7 @@ class PgyerApiClient(
             form["buildUpdateDescription"] = params.updateDescription
         }
 
-        val response = postMultipartForm("$apiBase/apiv2/app/getCOSToken", form)
+        val response = postMultipartForm("/apiv2/app/getCOSToken", form)
         val body = response.body
         val root = JsonParser.parseString(body).asJsonObject
         val code = root.get("code")?.asInt ?: -1
@@ -136,7 +146,7 @@ class PgyerApiClient(
     ) {
         val fields = LinkedHashMap(token.fields)
         fields["x-cos-meta-file-name"] = apkPath.fileName.toString()
-        val status = postMultipartFile(token.endpoint, fields, apkPath, onBytes).statusCode
+        val status = postMultipartFileFixedLength(token.endpoint, fields, apkPath, onBytes).statusCode
         if (status != 204 && status !in 200..299) {
             throw IOException("COS upload failed with HTTP $status")
         }
@@ -154,25 +164,31 @@ class PgyerApiClient(
                     processFraction.coerceAtMost(0.98),
                 )
             )
-            val uri = URI.create(
-                "$apiBase/apiv2/app/buildInfo?_api_key=${urlEncode(apiKey)}&buildKey=${urlEncode(buildKey)}"
-            )
-            val request = HttpRequest.newBuilder(uri)
-                .timeout(Duration.ofSeconds(30))
-                .GET()
-                .build()
-            val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-            if (response.statusCode() !in 200..299) {
-                throw IOException("buildInfo HTTP ${response.statusCode()}: ${response.body()}")
+            val body = withRetry(stage = "buildInfo", maxAttempts = 2) {
+                val uri = URI.create(
+                    "$apiBase/apiv2/app/buildInfo?_api_key=${urlEncode(apiKey)}&buildKey=${urlEncode(buildKey)}"
+                )
+                val request = HttpRequest.newBuilder(uri)
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .timeout(Duration.ofSeconds(30))
+                    .header("User-Agent", USER_AGENT)
+                    .header("Connection", "close")
+                    .GET()
+                    .build()
+                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                if (response.statusCode() !in 200..299) {
+                    throw IOException("buildInfo HTTP ${response.statusCode()}: ${response.body()}")
+                }
+                response.body()
             }
-            val root = JsonParser.parseString(response.body()).asJsonObject
+            val root = JsonParser.parseString(body).asJsonObject
             val code = root.get("code")?.asInt ?: -1
             if (code == 1246 || code == 1247) {
                 Thread.sleep(POLL_INTERVAL_MS)
                 continue
             }
             if (code != 0) {
-                throw PgyerApiException(code, root.get("message")?.asString ?: response.body())
+                throw PgyerApiException(code, root.get("message")?.asString ?: body)
             }
             val data = root.getAsJsonObject("data")
                 ?: throw PgyerApiException(code, "Missing build data")
@@ -220,23 +236,41 @@ class PgyerApiClient(
 
     private data class MultipartResult(val statusCode: Int, val body: String)
 
-    private fun postMultipartForm(url: String, fields: Map<String, String>): MultipartResult {
+    private fun postMultipartForm(path: String, fields: Map<String, String>): MultipartResult {
         val boundary = "----PgyerBoundary${UUID.randomUUID().toString().replace("-", "")}"
         val body = buildFormOnlyBody(boundary, fields)
-        val request = HttpRequest.newBuilder(URI.create(url))
-            .timeout(Duration.ofMinutes(2))
-            .header("Content-Type", "multipart/form-data; boundary=$boundary")
-            .POST(HttpRequest.BodyPublishers.ofByteArray(body))
-            .build()
-        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-        if (response.statusCode() !in 200..299) {
-            throw IOException("POST $url failed with HTTP ${response.statusCode()}: ${response.body()}")
+        var lastError: Exception? = null
+        for (host in apiHosts) {
+            try {
+                val url = "https://$host$path"
+                val request = HttpRequest.newBuilder(URI.create(url))
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .timeout(Duration.ofMinutes(2))
+                    .header("Content-Type", "multipart/form-data; boundary=$boundary")
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept", "application/json")
+                    .header("Connection", "close")
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                    .build()
+                val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                if (response.statusCode() !in 200..299) {
+                    throw IOException("POST $url failed with HTTP ${response.statusCode()}: ${response.body()}")
+                }
+                activeApiHost = host
+                return MultipartResult(response.statusCode(), response.body())
+            } catch (e: Exception) {
+                lastError = e
+            }
         }
-        return MultipartResult(response.statusCode(), response.body())
+        throw wrapNetworkError("getCOSToken", lastError)
     }
 
-    private fun postMultipartFile(
-        url: String,
+    /**
+     * Upload with a known Content-Length via HttpURLConnection.
+     * Avoids chunked encoding that COS commonly rejects.
+     */
+    private fun postMultipartFileFixedLength(
+        endpoint: String,
         fields: Map<String, String>,
         filePath: Path,
         onBytes: (uploaded: Long, total: Long) -> Unit,
@@ -258,50 +292,63 @@ class PgyerApiClient(
         val epilogue = "\r\n--$boundary--\r\n".toByteArray(charset)
         val fileSize = Files.size(filePath)
         val totalBytes = preamble.size + fileSize + epilogue.size
-        val uploaded = AtomicLong(0)
 
-        fun counting(stream: InputStream, length: Long): InputStream {
-            return object : InputStream() {
-                override fun read(): Int {
-                    val b = stream.read()
-                    if (b >= 0) {
-                        val n = uploaded.incrementAndGet()
-                        if (n % 64_000L == 0L || n >= totalBytes) {
-                            onBytes(n.coerceAtMost(totalBytes), totalBytes)
-                        }
-                    }
-                    return b
-                }
-
-                override fun read(b: ByteArray, off: Int, len: Int): Int {
-                    val n = stream.read(b, off, len)
-                    if (n > 0) {
-                        val total = uploaded.addAndGet(n.toLong())
-                        onBytes(total.coerceAtMost(totalBytes), totalBytes)
-                    }
-                    return n
-                }
-
-                override fun close() = stream.close()
-            }
+        val connection = (URI.create(endpoint).toURL().openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            doInput = true
+            useCaches = false
+            instanceFollowRedirects = true
+            connectTimeout = 60_000
+            readTimeout = 30 * 60_000
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("Accept", "*/*")
+            setRequestProperty("Connection", "close")
+            // Critical: fixed length — not chunked
+            setFixedLengthStreamingMode(totalBytes)
         }
 
-        val streams = listOf(
-            counting(ByteArrayInputStream(preamble), preamble.size.toLong()),
-            counting(Files.newInputStream(filePath), fileSize),
-            counting(ByteArrayInputStream(epilogue), epilogue.size.toLong()),
-        )
-        val sequence = SequenceInputStream(Collections.enumeration(streams))
         onBytes(0, totalBytes)
+        try {
+            connection.outputStream.use { out ->
+                writeAndCount(out, preamble, 0, totalBytes, onBytes)
+                var uploaded = preamble.size.toLong()
+                Files.newInputStream(filePath).use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        out.write(buffer, 0, n)
+                        uploaded += n
+                        onBytes(uploaded.coerceAtMost(totalBytes), totalBytes)
+                    }
+                }
+                out.write(epilogue)
+                out.flush()
+                onBytes(totalBytes, totalBytes)
+            }
 
-        val request = HttpRequest.newBuilder(URI.create(url))
-            .timeout(Duration.ofMinutes(30))
-            .header("Content-Type", "multipart/form-data; boundary=$boundary")
-            .POST(HttpRequest.BodyPublishers.ofInputStream { sequence })
-            .build()
-        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-        onBytes(totalBytes, totalBytes)
-        return MultipartResult(response.statusCode(), response.body())
+            val status = connection.responseCode
+            val stream = if (status >= 400) connection.errorStream else connection.inputStream
+            val responseBody = stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
+            return MultipartResult(status, responseBody)
+        } catch (e: Exception) {
+            throw wrapNetworkError("COS upload", e)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun writeAndCount(
+        out: OutputStream,
+        bytes: ByteArray,
+        alreadyUploaded: Long,
+        totalBytes: Long,
+        onBytes: (Long, Long) -> Unit,
+    ) {
+        out.write(bytes)
+        onBytes((alreadyUploaded + bytes.size).coerceAtMost(totalBytes), totalBytes)
     }
 
     private fun buildFormOnlyBody(boundary: String, fields: Map<String, String>): ByteArray {
@@ -318,15 +365,77 @@ class PgyerApiClient(
         return out.toByteArray()
     }
 
-    private val apiBase: String get() = "https://$apiHost"
+    private fun <T> withRetry(stage: String, maxAttempts: Int = 3, block: () -> T): T {
+        var last: Exception? = null
+        repeat(maxAttempts) { index ->
+            try {
+                return block()
+            } catch (e: PgyerApiException) {
+                throw e
+            } catch (e: Exception) {
+                last = e
+                if (index < maxAttempts - 1 && isTransientNetworkError(e)) {
+                    // Rotate API host on next attempt when relevant
+                    rotateApiHost()
+                    Thread.sleep(500L * (index + 1))
+                } else if (!isTransientNetworkError(e)) {
+                    throw wrapNetworkError(stage, e)
+                }
+            }
+        }
+        throw wrapNetworkError(stage, last)
+    }
+
+    private fun rotateApiHost() {
+        val idx = apiHosts.indexOf(activeApiHost)
+        activeApiHost = apiHosts[(idx + 1).coerceAtLeast(0) % apiHosts.size]
+    }
+
+    private val apiBase: String get() = "https://$activeApiHost"
 
     private fun urlEncode(value: String): String =
         URLEncoder.encode(value, StandardCharsets.UTF_8)
 
     companion object {
-        const val DEFAULT_HOST = "www.pgyer.com"
+        val DEFAULT_API_HOSTS = listOf("www.pgyer.com", "api.pgyer.com", "www.xcxwo.com")
+        private const val USER_AGENT = "PgyerApkUploader-IDE/1.0 (IntelliJ Platform)"
         private const val MAX_POLL_ATTEMPTS = 60
         private const val POLL_INTERVAL_MS = 2_000L
+
+        fun isTransientNetworkError(error: Throwable): Boolean {
+            var current: Throwable? = error
+            while (current != null) {
+                val message = current.message.orEmpty()
+                if (
+                    message.contains("header parser received no bytes", ignoreCase = true) ||
+                    message.contains("Connection reset", ignoreCase = true) ||
+                    message.contains("Broken pipe", ignoreCase = true) ||
+                    message.contains("GOAWAY", ignoreCase = true) ||
+                    message.contains("timed out", ignoreCase = true) ||
+                    message.contains("connection closed", ignoreCase = true) ||
+                    current is java.net.SocketException ||
+                    current is java.net.http.HttpTimeoutException
+                ) {
+                    return true
+                }
+                current = current.cause
+            }
+            return false
+        }
+
+        fun wrapNetworkError(stage: String, error: Throwable?): IOException {
+            val raw = error?.message ?: "unknown network error"
+            if (raw.contains("header parser received no bytes", ignoreCase = true) ||
+                (error != null && isTransientNetworkError(error))
+            ) {
+                return IOException(
+                    "Network connection closed during $stage ($raw). " +
+                        "Please retry. If it keeps failing, check VPN/proxy/firewall access to pgyer.com and the COS upload host.",
+                    error,
+                )
+            }
+            return IOException("Failed during $stage: $raw", error)
+        }
     }
 }
 

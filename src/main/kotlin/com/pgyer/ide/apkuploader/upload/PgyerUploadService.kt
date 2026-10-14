@@ -54,7 +54,7 @@ object PgyerUploadService {
                         }
                     }
                 } catch (e: Exception) {
-                    val message = e.message ?: e.toString()
+                    val message = friendlyUploadError(e)
                     ApplicationManager.getApplication().invokeLater {
                         uiCallback?.onProgress(
                             UploadProgress(UploadProgress.Stage.FAILED, message, indicator.fraction)
@@ -96,5 +96,16 @@ object PgyerUploadService {
             return PgyerBundle.message("notify.invalidApk", path.fileName.toString())
         }
         return null
+    }
+
+    internal fun friendlyUploadError(error: Throwable): String {
+        val raw = error.message ?: error.toString()
+        return if (PgyerApiClient.isTransientNetworkError(error) ||
+            raw.contains("header parser received no bytes", ignoreCase = true)
+        ) {
+            PgyerBundle.message("notify.networkClosed", raw)
+        } else {
+            raw
+        }
     }
 }
