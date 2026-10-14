@@ -26,10 +26,12 @@ import java.util.UUID
  *
  * Docs: https://www.pgyer.com/doc/view/api_upload
  *
- * Note: COS uploads use [HttpURLConnection] with a known Content-Length.
- * Java [HttpClient] `ofInputStream` uses chunked transfer encoding, which
- * Tencent COS often rejects by closing the socket — surfacing as
- * "HTTP/1.1 header parser received no bytes".
+ * COS notes:
+ * - Use fixed Content-Length (not chunked) — chunked uploads often fail with
+ *   "HTTP/1.1 header parser received no bytes".
+ * - Send only the signed fields in official order:
+ *   key → signature → x-cos-security-token → x-cos-meta-file-name → file
+ * - Extra/unordered fields commonly produce HTTP 400 from COS.
  */
 class PgyerApiClient(
     private val apiHosts: List<String> = DEFAULT_API_HOSTS,
@@ -68,19 +70,18 @@ class PgyerApiClient(
                 0.12,
             )
         )
-        withRetry(stage = "COS upload", maxAttempts = 2) {
-            uploadToCos(params.apkPath, token) { uploaded, total ->
-                val fileFraction = if (total > 0) uploaded.toDouble() / total.toDouble() else 0.0
-                val overall = 0.12 + fileFraction * 0.63
-                val pct = (fileFraction * 100).toInt()
-                listener.onProgress(
-                    UploadProgress(
-                        UploadProgress.Stage.UPLOAD,
-                        "Uploading ${params.apkPath.fileName}… $pct%",
-                        overall,
-                    )
+        // Do not retry HTTP 400 — token/signature is wrong or form is invalid.
+        uploadToCos(params.apkPath, token) { uploaded, total ->
+            val fileFraction = if (total > 0) uploaded.toDouble() / total.toDouble() else 0.0
+            val overall = 0.12 + fileFraction * 0.63
+            val pct = (fileFraction * 100).toInt()
+            listener.onProgress(
+                UploadProgress(
+                    UploadProgress.Stage.UPLOAD,
+                    "Uploading ${params.apkPath.fileName}… $pct%",
+                    overall,
                 )
-            }
+            )
         }
 
         listener.onProgress(
@@ -113,7 +114,8 @@ class PgyerApiClient(
             form["buildUpdateDescription"] = params.updateDescription
         }
 
-        val response = postMultipartForm("/apiv2/app/getCOSToken", form)
+        // Official Node/Python demos use x-www-form-urlencoded for getCOSToken.
+        val response = postUrlEncodedForm("/apiv2/app/getCOSToken", form)
         val body = response.body
         val root = JsonParser.parseString(body).asJsonObject
         val code = root.get("code")?.asInt ?: -1
@@ -126,17 +128,23 @@ class PgyerApiClient(
             ?: throw PgyerApiException(code, "Missing endpoint in getCOSToken response")
         val cosParams = data.getAsJsonObject("params")
             ?: throw PgyerApiException(code, "Missing params in getCOSToken response")
-        val buildKey = cosParams.get("key")?.asString
-            ?: data.get("key")?.asString
-            ?: throw PgyerApiException(code, "Missing build key in getCOSToken response")
 
-        val fields = linkedMapOf<String, String>()
-        for ((key, value) in cosParams.entrySet()) {
-            if (value.isJsonPrimitive) {
-                fields[key] = value.asString
-            }
-        }
-        return CosToken(endpoint = endpoint, buildKey = buildKey, fields = fields)
+        val uploadKey = cosParams.get("key")?.asString
+            ?: throw PgyerApiException(code, "Missing params.key in getCOSToken response")
+        val signature = cosParams.get("signature")?.asString
+            ?: throw PgyerApiException(code, "Missing params.signature in getCOSToken response")
+        val securityToken = cosParams.get("x-cos-security-token")?.asString
+            ?: throw PgyerApiException(code, "Missing params.x-cos-security-token in getCOSToken response")
+        // buildInfo uses data.key in official demos; fall back to params.key
+        val buildKey = data.get("key")?.asString?.takeIf { it.isNotBlank() } ?: uploadKey
+
+        return CosToken(
+            endpoint = endpoint,
+            buildKey = buildKey,
+            uploadKey = uploadKey,
+            signature = signature,
+            securityToken = securityToken,
+        )
     }
 
     private fun uploadToCos(
@@ -144,11 +152,20 @@ class PgyerApiClient(
         token: CosToken,
         onBytes: (uploaded: Long, total: Long) -> Unit,
     ) {
-        val fields = LinkedHashMap(token.fields)
-        fields["x-cos-meta-file-name"] = apkPath.fileName.toString()
-        val status = postMultipartFileFixedLength(token.endpoint, fields, apkPath, onBytes).statusCode
-        if (status != 204 && status !in 200..299) {
-            throw IOException("COS upload failed with HTTP $status")
+        val fileName = sanitizeFileName(apkPath.fileName.toString())
+        val fields = buildCosFormFields(
+            uploadKey = token.uploadKey,
+            signature = token.signature,
+            securityToken = token.securityToken,
+            fileName = fileName,
+        )
+        val result = postMultipartFileFixedLength(token.endpoint, fields, apkPath, fileName, onBytes)
+        if (result.statusCode != 204 && result.statusCode !in 200..299) {
+            val detail = result.body.trim().take(500).ifBlank { "(empty body)" }
+            throw CosUploadException(
+                result.statusCode,
+                "COS upload failed with HTTP ${result.statusCode}: $detail",
+            )
         }
     }
 
@@ -231,14 +248,17 @@ class PgyerApiClient(
     private data class CosToken(
         val endpoint: String,
         val buildKey: String,
-        val fields: Map<String, String>,
+        val uploadKey: String,
+        val signature: String,
+        val securityToken: String,
     )
 
     private data class MultipartResult(val statusCode: Int, val body: String)
 
-    private fun postMultipartForm(path: String, fields: Map<String, String>): MultipartResult {
-        val boundary = "----PgyerBoundary${UUID.randomUUID().toString().replace("-", "")}"
-        val body = buildFormOnlyBody(boundary, fields)
+    private fun postUrlEncodedForm(path: String, fields: Map<String, String>): MultipartResult {
+        val body = fields.entries.joinToString("&") { (k, v) ->
+            "${urlEncode(k)}=${urlEncode(v)}"
+        }
         var lastError: Exception? = null
         for (host in apiHosts) {
             try {
@@ -246,11 +266,11 @@ class PgyerApiClient(
                 val request = HttpRequest.newBuilder(URI.create(url))
                     .version(HttpClient.Version.HTTP_1_1)
                     .timeout(Duration.ofMinutes(2))
-                    .header("Content-Type", "multipart/form-data; boundary=$boundary")
+                    .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
                     .header("User-Agent", USER_AGENT)
                     .header("Accept", "application/json")
                     .header("Connection", "close")
-                    .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build()
                 val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
                 if (response.statusCode() !in 200..299) {
@@ -273,9 +293,11 @@ class PgyerApiClient(
         endpoint: String,
         fields: Map<String, String>,
         filePath: Path,
+        fileName: String,
         onBytes: (uploaded: Long, total: Long) -> Unit,
     ): MultipartResult {
-        val boundary = "----PgyerBoundary${UUID.randomUUID().toString().replace("-", "")}"
+        // Use a simple boundary without leading dashes in the value itself.
+        val boundary = "PgyerBoundary${UUID.randomUUID().toString().replace("-", "")}"
         val charset = StandardCharsets.UTF_8
         val preamble = buildString {
             for ((name, value) in fields) {
@@ -284,7 +306,6 @@ class PgyerApiClient(
                 append(value)
                 append("\r\n")
             }
-            val fileName = filePath.fileName.toString()
             append("--$boundary\r\n")
             append("Content-Disposition: form-data; name=\"file\"; filename=\"$fileName\"\r\n")
             append("Content-Type: application/octet-stream\r\n\r\n")
@@ -298,14 +319,14 @@ class PgyerApiClient(
             doOutput = true
             doInput = true
             useCaches = false
-            instanceFollowRedirects = true
+            // POST + redirect can drop the body; COS should not need redirects.
+            instanceFollowRedirects = false
             connectTimeout = 60_000
             readTimeout = 30 * 60_000
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             setRequestProperty("User-Agent", USER_AGENT)
             setRequestProperty("Accept", "*/*")
             setRequestProperty("Connection", "close")
-            // Critical: fixed length — not chunked
             setFixedLengthStreamingMode(totalBytes)
         }
 
@@ -333,6 +354,8 @@ class PgyerApiClient(
             val stream = if (status >= 400) connection.errorStream else connection.inputStream
             val responseBody = stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
             return MultipartResult(status, responseBody)
+        } catch (e: CosUploadException) {
+            throw e
         } catch (e: Exception) {
             throw wrapNetworkError("COS upload", e)
         } finally {
@@ -351,20 +374,6 @@ class PgyerApiClient(
         onBytes((alreadyUploaded + bytes.size).coerceAtMost(totalBytes), totalBytes)
     }
 
-    private fun buildFormOnlyBody(boundary: String, fields: Map<String, String>): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
-        val charset = StandardCharsets.UTF_8
-        fun write(s: String) = out.write(s.toByteArray(charset))
-        for ((name, value) in fields) {
-            write("--$boundary\r\n")
-            write("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
-            write(value)
-            write("\r\n")
-        }
-        write("--$boundary--\r\n")
-        return out.toByteArray()
-    }
-
     private fun <T> withRetry(stage: String, maxAttempts: Int = 3, block: () -> T): T {
         var last: Exception? = null
         repeat(maxAttempts) { index ->
@@ -372,10 +381,11 @@ class PgyerApiClient(
                 return block()
             } catch (e: PgyerApiException) {
                 throw e
+            } catch (e: CosUploadException) {
+                throw e
             } catch (e: Exception) {
                 last = e
                 if (index < maxAttempts - 1 && isTransientNetworkError(e)) {
-                    // Rotate API host on next attempt when relevant
                     rotateApiHost()
                     Thread.sleep(500L * (index + 1))
                 } else if (!isTransientNetworkError(e)) {
@@ -397,12 +407,43 @@ class PgyerApiClient(
         URLEncoder.encode(value, StandardCharsets.UTF_8)
 
     companion object {
-        val DEFAULT_API_HOSTS = listOf("www.pgyer.com", "api.pgyer.com", "www.xcxwo.com")
+        // Match official PGYER demos; keep www.pgyer.com as a fallback.
+        val DEFAULT_API_HOSTS = listOf(
+            "api.pgyer.com",
+            "api.xcxwo.com",
+            "api.pgyerapp.com",
+            "www.pgyer.com",
+        )
         private const val USER_AGENT = "PgyerApkUploader-IDE/1.0 (IntelliJ Platform)"
         private const val MAX_POLL_ATTEMPTS = 60
         private const val POLL_INTERVAL_MS = 2_000L
 
+        /**
+         * Official shell demo field order. `file` is appended separately and must be last.
+         */
+        fun buildCosFormFields(
+            uploadKey: String,
+            signature: String,
+            securityToken: String,
+            fileName: String,
+        ): LinkedHashMap<String, String> = linkedMapOf(
+            "key" to uploadKey,
+            "signature" to signature,
+            "x-cos-security-token" to securityToken,
+            "x-cos-meta-file-name" to fileName,
+        )
+
+        fun sanitizeFileName(name: String): String {
+            val base = name.substringAfterLast('/').substringAfterLast('\\')
+            val cleaned = base.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                .ifBlank { "app.apk" }
+            return if (cleaned.endsWith(".apk", ignoreCase = true)) cleaned else "$cleaned.apk"
+        }
+
         fun isTransientNetworkError(error: Throwable): Boolean {
+            if (error is CosUploadException && error.statusCode in 400..499) {
+                return false
+            }
             var current: Throwable? = error
             while (current != null) {
                 val message = current.message.orEmpty()
@@ -440,3 +481,8 @@ class PgyerApiClient(
 }
 
 class PgyerApiException(val code: Int, override val message: String) : Exception("Pgyer API error $code: $message")
+
+class CosUploadException(
+    val statusCode: Int,
+    override val message: String,
+) : IOException(message)

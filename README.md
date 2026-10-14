@@ -54,6 +54,10 @@
 > **上传错误**：`HTTP/1.1 header parser received no bytes`  
 > 多为上传链路被对端提前关闭（旧实现用 chunked 上传 COS 时易触发）。当前版本已改为 **固定 Content-Length** 上传并自动重试；若仍失败，请检查 VPN/代理/防火墙是否放行 `pgyer.com` 与 COS 域名。
 
+> **上传错误**：`COS upload failed with HTTP 400`  
+> COS 拒绝了 multipart 表单（字段顺序/多余字段/文件名）。当前实现按官方示例只提交  
+> `key → signature → x-cos-security-token → x-cos-meta-file-name → file`，并用 urlencoded 获取 token；错误信息会附带 COS 返回正文便于排查。
+
 ### 用 Gradle 构建
 
 ```bash
@@ -162,6 +166,13 @@ Uses Pgyer fast upload: `getCOSToken` → COS upload → poll `buildInfo`. Docs:
 > Almost always means **JDK 24+** is running **Gradle 8.x**, or plugin/Gradle versions are mismatched.  
 > Fix: install JDK 21 and point the IDE **Gradle JVM** at it (or set `JAVA_HOME` to JDK 21) before `./gradlew …`.  
 > This repo pins the Gradle Daemon via `gradle/gradle-daemon-jvm.properties` (`toolchainVersion=21`).
+
+> **Upload error**: `HTTP/1.1 header parser received no bytes`  
+> Usually the peer closed the connection early (chunked COS uploads were a common trigger). Current builds use **fixed Content-Length** uploads with retries; if it persists, check VPN/proxy/firewall access to `pgyer.com` and the COS host.
+
+> **Upload error**: `COS upload failed with HTTP 400`  
+> COS rejected the multipart form (field order / extra fields / filename). The client now posts only  
+> `key → signature → x-cos-security-token → x-cos-meta-file-name → file` (official order) and uses urlencoded `getCOSToken`; the error text includes the COS response body.
 
 ### Build the plugin zip
 
