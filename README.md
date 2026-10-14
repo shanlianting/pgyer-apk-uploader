@@ -51,6 +51,9 @@
 > `export JAVA_HOME=$(/usr/libexec/java_home -v 21)`（macOS）后执行 `./gradlew …`。  
 > 仓库已通过 `gradle/gradle-daemon-jvm.properties` 将 Daemon 固定为 **toolchain 21**。
 
+> **上传错误**：`HTTP/1.1 header parser received no bytes`  
+> 多为上传链路被对端提前关闭（旧实现用 chunked 上传 COS 时易触发）。当前版本已改为 **固定 Content-Length** 上传并自动重试；若仍失败，请检查 VPN/代理/防火墙是否放行 `pgyer.com` 与 COS 域名。
+
 ### 用 Gradle 构建
 
 ```bash
