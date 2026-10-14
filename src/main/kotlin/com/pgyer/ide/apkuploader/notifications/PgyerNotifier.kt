@@ -6,34 +6,35 @@ import com.intellij.notification.NotificationType
 import com.intellij.openapi.project.Project
 import com.intellij.ide.BrowserUtil
 import com.pgyer.ide.apkuploader.PgyerBundle
+import com.pgyer.ide.apkuploader.ui.PgyerUploadResultDialog
 import com.pgyer.ide.apkuploader.upload.PgyerUploadResult
 
 object PgyerNotifier {
     private const val GROUP_ID = "Pgyer APK Uploader"
 
     fun notifySuccess(project: Project?, result: PgyerUploadResult) {
-        val versionLabel = listOf(result.buildVersion, result.buildBuildVersion)
-            .filter { it.isNotBlank() }
-            .joinToString(" / ")
-            .ifBlank { result.buildKey }
-        val name = result.buildName.ifBlank { "APK" }
         val notification = NotificationGroupManager.getInstance()
             .getNotificationGroup(GROUP_ID)
             .createNotification(
                 PgyerBundle.message("notify.success.title"),
-                PgyerBundle.message("notify.success.body", name, versionLabel),
+                PgyerBundle.message("notify.success.body", result.displayName, result.versionLabel),
                 NotificationType.INFORMATION,
             )
+        notification.addAction(
+            NotificationAction.createSimple(PgyerBundle.message("notify.action.showDetails")) {
+                PgyerUploadResultDialog.show(project, result)
+            }
+        )
         if (result.installPageUrl.isNotBlank()) {
             notification.addAction(
-                NotificationAction.createSimple("Open install page") {
+                NotificationAction.createSimple(PgyerBundle.message("result.openInstallPage")) {
                     BrowserUtil.browse(result.installPageUrl)
                 }
             )
         }
         if (result.qrCodeUrl.isNotBlank()) {
             notification.addAction(
-                NotificationAction.createSimple("Open QR code") {
+                NotificationAction.createSimple(PgyerBundle.message("result.openQr")) {
                     BrowserUtil.browse(result.qrCodeUrl)
                 }
             )

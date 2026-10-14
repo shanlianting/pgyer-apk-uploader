@@ -16,7 +16,19 @@ data class PgyerUploadResult(
     val buildName: String,
     val buildVersion: String,
     val buildBuildVersion: String,
+    val buildFileSize: String = "",
+    val buildType: String = "",
     val shortcutUrl: String,
     val installPageUrl: String,
     val qrCodeUrl: String,
-)
+    val buildIconUrl: String = "",
+) {
+    val versionLabel: String
+        get() = listOf(buildVersion, buildBuildVersion)
+            .filter { it.isNotBlank() }
+            .joinToString(" / ")
+            .ifBlank { buildKey.ifBlank { "-" } }
+
+    val displayName: String
+        get() = buildName.ifBlank { "APK" }
+}

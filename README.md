@@ -9,7 +9,7 @@
 - Tools 菜单 / 项目视图右键：上传 APK 到蒲公英
 - 右侧 Tool Window：**Pgyer Upload**（选文件、检测 `build/outputs/apk`、填写描述与安装方式）
 - 设置页保存 **API Key**（PasswordSafe / 系统钥匙串），以及默认安装方式、密码、更新说明
-- 上传进度（Background Task）+ 成功/失败通知；成功时可打开安装页 / 二维码
+- 上传进度条（百分比 + 阶段文案）+ 成功/失败状态提示；成功后在 Tool Window / 弹窗展示应用名、版本、构建号、安装页与二维码
 
 ## 获取蒲公英 API Key
 
@@ -119,7 +119,7 @@ IntelliJ Platform plugin for **Android Studio** / IntelliJ IDEA that uploads APK
 - **Tools** menu and Project View context action to upload an APK
 - Tool window **Pgyer Upload**: browse APK, detect recent `build/outputs/apk` artifacts, set description / install type / password
 - Settings page for **API Key** (PasswordSafe), default install options
-- Background progress + balloon notifications; open install page / QR on success
+- Progress bar (percent + stage text) with success/failure status; success view shows app name, version, build number, install page, and QR code
 
 ## Get a Pgyer API Key
 
