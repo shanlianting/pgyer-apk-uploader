@@ -9,6 +9,7 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
+import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPasswordField
 import com.intellij.ui.components.JBScrollPane
@@ -24,8 +25,12 @@ import com.pgyer.ide.apkuploader.settings.PgyerCredentialsStore
 import com.pgyer.ide.apkuploader.settings.PgyerSettingsState
 import com.pgyer.ide.apkuploader.upload.ApkDetector
 import com.pgyer.ide.apkuploader.upload.InstallType
+import com.pgyer.ide.apkuploader.upload.PgyerUploadResult
 import com.pgyer.ide.apkuploader.upload.PgyerUploadService
+import com.pgyer.ide.apkuploader.upload.UploadProgress
+import com.pgyer.ide.apkuploader.upload.UploadUiCallback
 import java.awt.BorderLayout
+import java.awt.Font
 import java.nio.file.Paths
 import javax.swing.Box
 import javax.swing.BoxLayout
@@ -33,6 +38,7 @@ import javax.swing.DefaultListCellRenderer
 import javax.swing.JButton
 import javax.swing.JList
 import javax.swing.JPanel
+import javax.swing.JProgressBar
 import javax.swing.SwingConstants
 
 class PgyerToolWindowFactory : ToolWindowFactory, DumbAware {
@@ -47,11 +53,21 @@ class PgyerToolWindowFactory : ToolWindowFactory, DumbAware {
 private class PgyerUploadPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val apkPathField = JBTextField()
     private val recentCombo = ComboBox<java.nio.file.Path>()
-    private val updateDescriptionArea = JBTextArea(5, 30)
-    private val appDescriptionArea = JBTextArea(3, 30)
+    private val updateDescriptionArea = JBTextArea(4, 30)
+    private val appDescriptionArea = JBTextArea(2, 30)
     private val installTypeCombo = ComboBox(InstallType.entries.toTypedArray())
     private val passwordField = JBPasswordField()
-    private val statusLabel = JBLabel(" ").apply { border = JBUI.Borders.empty(4, 0) }
+    private val progressBar = JProgressBar(0, 100).apply {
+        isStringPainted = true
+        string = "0%"
+        isVisible = false
+    }
+    private val statusLabel = JBLabel(" ").apply {
+        border = JBUI.Borders.empty(4, 0)
+    }
+    private val resultView = PgyerUploadResultView()
+    private val uploadButton = JButton(PgyerBundle.message("toolwindow.upload"))
+    private var uploading = false
 
     init {
         border = JBUI.Borders.empty(12)
@@ -93,9 +109,7 @@ private class PgyerUploadPanel(private val project: Project) : JPanel(BorderLayo
         val detectButton = JButton(PgyerBundle.message("toolwindow.detect")).apply {
             addActionListener { refreshRecent(selectFirst = true) }
         }
-        val uploadButton = JButton(PgyerBundle.message("toolwindow.upload")).apply {
-            addActionListener { upload() }
-        }
+        uploadButton.addActionListener { upload() }
         val settingsButton = JButton(PgyerBundle.message("toolwindow.openSettings")).apply {
             addActionListener { OpenPgyerSettingsAction.openSettings(project) }
         }
@@ -115,13 +129,18 @@ private class PgyerUploadPanel(private val project: Project) : JPanel(BorderLayo
             add(settingsButton)
             add(Box.createHorizontalGlue())
         }
+        val uploadProgressPanel = JPanel(BorderLayout(0, 4)).apply {
+            border = JBUI.Borders.emptyTop(8)
+            add(progressBar, BorderLayout.NORTH)
+            add(statusLabel, BorderLayout.SOUTH)
+        }
 
         val form = FormBuilder.createFormBuilder()
             .addComponent(JBLabel("<html><b>Pgyer APK Uploader</b></html>").apply {
                 horizontalAlignment = SwingConstants.LEFT
             }, 1)
             .addLabeledComponent(JBLabel(PgyerBundle.message("toolwindow.apkPath")), pathRow, 1, false)
-            .addLabeledComponent(JBLabel("Recent APKs:"), recentRow, 1, false)
+            .addLabeledComponent(JBLabel(PgyerBundle.message("toolwindow.recentApks")), recentRow, 1, false)
             .addLabeledComponent(
                 JBLabel(PgyerBundle.message("toolwindow.updateDescription")),
                 JBScrollPane(updateDescriptionArea),
@@ -137,11 +156,15 @@ private class PgyerUploadPanel(private val project: Project) : JPanel(BorderLayo
             .addLabeledComponent(JBLabel(PgyerBundle.message("toolwindow.installType")), installTypeCombo, 1, false)
             .addLabeledComponent(JBLabel(PgyerBundle.message("toolwindow.password")), passwordField, 1, false)
             .addComponent(actions, 1)
-            .addComponent(statusLabel, 1)
+            .addComponent(uploadProgressPanel, 1)
+            .addComponent(resultView, 1)
             .addComponentFillVertically(JPanel(), 0)
             .panel
 
-        add(form, BorderLayout.CENTER)
+        add(JBScrollPane(form).apply {
+            border = JBUI.Borders.empty()
+            horizontalScrollBarPolicy = JBScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+        }, BorderLayout.CENTER)
         refreshRecent(selectFirst = apkPathField.text.isBlank())
     }
 
@@ -162,10 +185,16 @@ private class PgyerUploadPanel(private val project: Project) : JPanel(BorderLayo
             recentCombo.selectedIndex = 0
             apkPathField.text = apks.first().toString()
         }
-        statusLabel.text = if (apks.isEmpty()) "No recent APKs under build/outputs." else "Found ${apks.size} APK(s)."
+        if (!uploading) {
+            setIdleStatus(
+                if (apks.isEmpty()) PgyerBundle.message("toolwindow.noRecentApks")
+                else PgyerBundle.message("toolwindow.foundApks", apks.size)
+            )
+        }
     }
 
     private fun upload() {
+        if (uploading) return
         if (PgyerCredentialsStore.getApiKey().isBlank()) {
             PgyerNotifier.notifyFailure(project, PgyerBundle.message("notify.missingApiKey"))
             OpenPgyerSettingsAction.openSettings(project)
@@ -184,7 +213,91 @@ private class PgyerUploadPanel(private val project: Project) : JPanel(BorderLayo
             updateDescription = updateDescriptionArea.text.orEmpty(),
             appDescription = appDescriptionArea.text.orEmpty(),
         ) ?: return
-        statusLabel.text = "Uploading..."
-        PgyerUploadService.startUpload(project, params)
+
+        setUploading(true)
+        resultView.clear()
+        applyProgress(
+            UploadProgress(
+                UploadProgress.Stage.TOKEN,
+                PgyerBundle.message("progress.gettingToken"),
+                0.0,
+            )
+        )
+
+        // Result panel in the tool window is the primary success view; dialog is optional via notification.
+        PgyerUploadService.startUpload(
+            project = project,
+            params = params,
+            showResultDialog = false,
+            uiCallback = object : UploadUiCallback {
+                override fun onProgress(progress: UploadProgress) {
+                    applyProgress(progress)
+                }
+
+                override fun onSuccess(result: PgyerUploadResult) {
+                    setUploading(false)
+                    statusLabel.foreground = JBColor(0x2E7D32, 0xA5D6A7)
+                    statusLabel.font = statusLabel.font.deriveFont(Font.BOLD)
+                    statusLabel.text = PgyerBundle.message(
+                        "progress.successStatus",
+                        result.displayName,
+                        result.versionLabel,
+                    )
+                    progressBar.value = 100
+                    progressBar.string = "100%"
+                    progressBar.isVisible = true
+                    resultView.showResult(result)
+                }
+
+                override fun onFailure(message: String) {
+                    setUploading(false)
+                    statusLabel.foreground = JBColor(0xC62828, 0xEF9A9A)
+                    statusLabel.font = statusLabel.font.deriveFont(Font.BOLD)
+                    statusLabel.text = PgyerBundle.message("progress.failureStatus", message)
+                    progressBar.isVisible = true
+                }
+            },
+        )
+    }
+
+    private fun applyProgress(progress: UploadProgress) {
+        progressBar.isVisible = true
+        progressBar.isIndeterminate = progress.stage == UploadProgress.Stage.TOKEN && progress.fraction < 0.1
+        if (!progressBar.isIndeterminate) {
+            progressBar.value = progress.percent
+            progressBar.string = "${progress.percent}%"
+        } else {
+            progressBar.string = PgyerBundle.message("progress.preparing")
+        }
+        statusLabel.foreground = when (progress.stage) {
+            UploadProgress.Stage.FAILED -> JBColor(0xC62828, 0xEF9A9A)
+            UploadProgress.Stage.DONE -> JBColor(0x2E7D32, 0xA5D6A7)
+            else -> JBUI.CurrentTheme.Label.foreground()
+        }
+        statusLabel.font = statusLabel.font.deriveFont(
+            if (progress.stage == UploadProgress.Stage.DONE || progress.stage == UploadProgress.Stage.FAILED) {
+                Font.BOLD
+            } else {
+                Font.PLAIN
+            }
+        )
+        statusLabel.text = progress.message
+    }
+
+    private fun setUploading(value: Boolean) {
+        uploading = value
+        uploadButton.isEnabled = !value
+        uploadButton.text = if (value) {
+            PgyerBundle.message("toolwindow.uploading")
+        } else {
+            PgyerBundle.message("toolwindow.upload")
+        }
+    }
+
+    private fun setIdleStatus(text: String) {
+        statusLabel.foreground = JBUI.CurrentTheme.Label.foreground()
+        statusLabel.font = statusLabel.font.deriveFont(Font.PLAIN)
+        statusLabel.text = text
+        progressBar.isVisible = false
     }
 }
