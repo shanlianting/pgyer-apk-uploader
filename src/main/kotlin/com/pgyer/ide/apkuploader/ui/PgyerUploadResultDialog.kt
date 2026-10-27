@@ -26,7 +26,8 @@ class PgyerUploadResultDialog(
 
     override fun createCenterPanel(): JComponent {
         return resultView.apply {
-            preferredSize = Dimension(520, 280)
+            // Room for ~280px QR beside app metadata.
+            preferredSize = Dimension(720, 420)
         }
     }
 
