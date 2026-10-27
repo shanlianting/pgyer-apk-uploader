@@ -26,7 +26,7 @@ class PgyerUploadResultDialog(
 
     override fun createCenterPanel(): JComponent {
         return resultView.apply {
-            preferredSize = Dimension(520, 280)
+            preferredSize = Dimension(420, 560)
         }
     }
 
