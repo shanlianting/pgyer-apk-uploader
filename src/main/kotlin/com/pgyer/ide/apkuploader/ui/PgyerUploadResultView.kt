@@ -12,9 +12,6 @@ import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Font
-import java.awt.Image
-import java.net.URI
-import javax.imageio.ImageIO
 import javax.swing.BorderFactory
 import javax.swing.Box
 import javax.swing.BoxLayout
@@ -25,7 +22,7 @@ import javax.swing.JPanel
 import javax.swing.SwingConstants
 
 /**
- * Success result panel: app name, version, QR code, and install links.
+ * Success result panel: app name, version, large QR code, and install links.
  */
 class PgyerUploadResultView : JPanel(BorderLayout()) {
 
@@ -44,15 +41,22 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
         foreground = JBColor.BLUE
     }
     private val qrLabel = JLabel(PgyerBundle.message("result.qr.loading"), SwingConstants.CENTER).apply {
-        preferredSize = Dimension(180, 180)
-        minimumSize = Dimension(180, 180)
+        preferredSize = Dimension(QR_DISPLAY_SIZE, QR_DISPLAY_SIZE)
+        minimumSize = Dimension(QR_DISPLAY_SIZE, QR_DISPLAY_SIZE)
+        maximumSize = Dimension(QR_DISPLAY_SIZE, QR_DISPLAY_SIZE)
         horizontalAlignment = SwingConstants.CENTER
         verticalAlignment = SwingConstants.CENTER
-        border = BorderFactory.createLineBorder(JBColor.border())
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(JBColor.border()),
+            JBUI.Borders.empty(8),
+        )
+        isOpaque = true
+        background = JBColor.WHITE
     }
     private val openPageButton = JButton(PgyerBundle.message("result.openInstallPage"))
     private val openQrButton = JButton(PgyerBundle.message("result.openQr"))
     private var currentResult: PgyerUploadResult? = null
+    private var activeQrUrl: String = ""
 
     init {
         border = JBUI.Borders.compound(
@@ -65,7 +69,8 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
             currentResult?.installPageUrl?.takeIf { it.isNotBlank() }?.let { BrowserUtil.browse(it) }
         }
         openQrButton.addActionListener {
-            currentResult?.qrCodeUrl?.takeIf { it.isNotBlank() }?.let { BrowserUtil.browse(it) }
+            val target = activeQrUrl.ifBlank { currentResult?.installPageUrl.orEmpty() }
+            if (target.isNotBlank()) BrowserUtil.browse(target)
         }
 
         val info = JPanel().apply {
@@ -92,8 +97,12 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
         }
 
         val qrPanel = JPanel(BorderLayout()).apply {
-            border = JBUI.Borders.emptyLeft(16)
-            add(JBLabel(PgyerBundle.message("result.qr"), SwingConstants.CENTER), BorderLayout.NORTH)
+            border = JBUI.Borders.emptyLeft(20)
+            preferredSize = Dimension(QR_DISPLAY_SIZE + 24, QR_DISPLAY_SIZE + 40)
+            add(JBLabel(PgyerBundle.message("result.qr"), SwingConstants.CENTER).apply {
+                font = font.deriveFont(Font.BOLD, 12f)
+                border = JBUI.Borders.emptyBottom(6)
+            }, BorderLayout.NORTH)
             add(qrLabel, BorderLayout.CENTER)
         }
 
@@ -105,7 +114,8 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
         add(titleLabel, BorderLayout.NORTH)
         add(JBScrollPane(body).apply {
             border = JBUI.Borders.empty()
-            horizontalScrollBarPolicy = JBScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+            horizontalScrollBarPolicy = JBScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED
+            verticalScrollBarPolicy = JBScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
         }, BorderLayout.CENTER)
     }
 
@@ -118,9 +128,16 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
         keyLabel.text = result.buildKey.ifBlank { "-" }
         urlLabel.text = "<html><a href='${result.installPageUrl}'>${result.installPageUrl.ifBlank { "-" }}</a></html>"
         openPageButton.isEnabled = result.installPageUrl.isNotBlank()
-        openQrButton.isEnabled = result.qrCodeUrl.isNotBlank()
+
+        val resolvedQr = QrImageLoader.resolveQrUrl(
+            qrCodeUrl = result.qrCodeUrl,
+            shortcutUrl = result.shortcutUrl,
+            installPageUrl = result.installPageUrl,
+        )
+        activeQrUrl = resolvedQr
+        openQrButton.isEnabled = resolvedQr.isNotBlank() || result.installPageUrl.isNotBlank()
         qrLabel.icon = null
-        qrLabel.text = if (result.qrCodeUrl.isBlank()) {
+        qrLabel.text = if (resolvedQr.isBlank() && result.installPageUrl.isBlank()) {
             PgyerBundle.message("result.qr.unavailable")
         } else {
             PgyerBundle.message("result.qr.loading")
@@ -128,42 +145,37 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
         isVisible = true
         revalidate()
         repaint()
-        loadQrAsync(result.qrCodeUrl)
+        loadQrAsync(result, resolvedQr)
     }
 
     fun clear() {
         currentResult = null
+        activeQrUrl = ""
         isVisible = false
         qrLabel.icon = null
         qrLabel.text = " "
     }
 
-    private fun loadQrAsync(url: String) {
-        if (url.isBlank()) return
+    private fun loadQrAsync(result: PgyerUploadResult, resolvedQrUrl: String) {
+        if (resolvedQrUrl.isBlank() && result.installPageUrl.isBlank()) return
         ApplicationManager.getApplication().executeOnPooledThread {
-            try {
-                val image = ImageIO.read(URI.create(url).toURL())
+            val image = QrImageLoader.load(
+                qrCodeUrl = resolvedQrUrl,
+                fallbackContent = result.installPageUrl.ifBlank { resolvedQrUrl },
+                sizePx = QR_DISPLAY_SIZE,
+            )
+            ApplicationManager.getApplication().invokeLater {
+                if (currentResult !== result) return@invokeLater
                 if (image == null) {
-                    ApplicationManager.getApplication().invokeLater {
-                        if (currentResult?.qrCodeUrl == url) {
-                            qrLabel.text = PgyerBundle.message("result.qr.unavailable")
-                        }
-                    }
-                    return@executeOnPooledThread
+                    qrLabel.icon = null
+                    qrLabel.text = PgyerBundle.message("result.qr.unavailable")
+                } else {
+                    qrLabel.icon = ImageIcon(image)
+                    qrLabel.text = ""
                 }
-                val scaled = image.getScaledInstance(160, 160, Image.SCALE_SMOOTH)
-                ApplicationManager.getApplication().invokeLater {
-                    if (currentResult?.qrCodeUrl == url) {
-                        qrLabel.icon = ImageIcon(scaled)
-                        qrLabel.text = null
-                    }
-                }
-            } catch (_: Exception) {
-                ApplicationManager.getApplication().invokeLater {
-                    if (currentResult?.qrCodeUrl == url) {
-                        qrLabel.text = PgyerBundle.message("result.qr.unavailable")
-                    }
-                }
+                qrLabel.revalidate()
+                revalidate()
+                repaint()
             }
         }
     }
@@ -180,5 +192,10 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
             })
             add(value)
         }
+    }
+
+    companion object {
+        /** Display size for the success QR (larger than the previous 160px). */
+        const val QR_DISPLAY_SIZE = 280
     }
 }

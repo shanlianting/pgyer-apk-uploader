@@ -214,34 +214,47 @@ class PgyerApiClient(
     }
 
     private fun parseResult(data: JsonObject): PgyerUploadResult {
-        val shortcut = data.get("buildShortcutUrl")?.asString.orEmpty()
+        val shortcut = jsonString(data, "buildShortcutUrl")
         val installPage = when {
             shortcut.startsWith("http://") || shortcut.startsWith("https://") -> shortcut
             shortcut.isNotBlank() -> "https://www.pgyer.com/$shortcut"
             else -> {
-                val key = data.get("buildKey")?.asString.orEmpty()
+                val key = jsonString(data, "buildKey")
                 if (key.isNotBlank()) "https://www.pgyer.com/$key" else ""
             }
         }
-        val buildIcon = data.get("buildIcon")?.asString.orEmpty()
+        val buildIcon = jsonString(data, "buildIcon")
         val iconUrl = if (buildIcon.length >= 5) {
             val path = buildIcon.take(5).toCharArray().joinToString("/")
             "https://cdn-app-icon2.pgyer.com/$path/$buildIcon?x-oss-process=image/resize,m_lfit,h_120,w_120/format,jpg"
         } else {
             ""
         }
+        val qrFromApi = jsonString(data, "buildQRCodeURL")
+        val qrCodeUrl = when {
+            qrFromApi.isNotBlank() -> qrFromApi
+            shortcut.isNotBlank() && !shortcut.startsWith("http") ->
+                "https://www.pgyer.com/app/qrcode/$shortcut"
+            else -> ""
+        }
         return PgyerUploadResult(
-            buildKey = data.get("buildKey")?.asString.orEmpty(),
-            buildName = data.get("buildName")?.asString.orEmpty(),
-            buildVersion = data.get("buildVersion")?.asString.orEmpty(),
-            buildBuildVersion = data.get("buildBuildVersion")?.asString.orEmpty(),
-            buildFileSize = data.get("buildFileSize")?.asString.orEmpty(),
-            buildType = data.get("buildType")?.asString.orEmpty(),
+            buildKey = jsonString(data, "buildKey"),
+            buildName = jsonString(data, "buildName"),
+            buildVersion = jsonString(data, "buildVersion"),
+            buildBuildVersion = jsonString(data, "buildBuildVersion"),
+            buildFileSize = jsonString(data, "buildFileSize"),
+            buildType = jsonString(data, "buildType"),
             shortcutUrl = shortcut,
             installPageUrl = installPage,
-            qrCodeUrl = data.get("buildQRCodeURL")?.asString.orEmpty(),
+            qrCodeUrl = qrCodeUrl,
             buildIconUrl = iconUrl,
         )
+    }
+
+    private fun jsonString(data: JsonObject, key: String): String {
+        val element = data.get(key) ?: return ""
+        if (element.isJsonNull || !element.isJsonPrimitive) return ""
+        return element.asString.orEmpty()
     }
 
     private data class CosToken(
