@@ -21,7 +21,7 @@ import javax.swing.JPanel
 import javax.swing.SwingConstants
 
 /**
- * Success result panel: app name, version, QR code, and install links.
+ * Success result panel: app name, version, large QR code, and install links.
  */
 class PgyerUploadResultView : JPanel(BorderLayout()) {
 
@@ -40,15 +40,22 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
         foreground = JBColor.BLUE
     }
     private val qrLabel = JLabel(PgyerBundle.message("result.qr.loading"), SwingConstants.CENTER).apply {
-        preferredSize = Dimension(180, 180)
-        minimumSize = Dimension(180, 180)
+        preferredSize = Dimension(QR_DISPLAY_SIZE, QR_DISPLAY_SIZE)
+        minimumSize = Dimension(QR_DISPLAY_SIZE, QR_DISPLAY_SIZE)
+        maximumSize = Dimension(QR_DISPLAY_SIZE, QR_DISPLAY_SIZE)
         horizontalAlignment = SwingConstants.CENTER
         verticalAlignment = SwingConstants.CENTER
-        border = BorderFactory.createLineBorder(JBColor.border())
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(JBColor.border()),
+            JBUI.Borders.empty(8),
+        )
+        isOpaque = true
+        background = JBColor.WHITE
     }
     private val openPageButton = JButton(PgyerBundle.message("result.openInstallPage"))
     private val openQrButton = JButton(PgyerBundle.message("result.openQr"))
     private var currentResult: PgyerUploadResult? = null
+    private var activeQrUrl: String = ""
 
     init {
         border = JBUI.Borders.compound(
@@ -61,7 +68,8 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
             currentResult?.installPageUrl?.takeIf { it.isNotBlank() }?.let { BrowserUtil.browse(it) }
         }
         openQrButton.addActionListener {
-            currentResult?.qrCodeUrl?.takeIf { it.isNotBlank() }?.let { BrowserUtil.browse(it) }
+            val target = activeQrUrl.ifBlank { currentResult?.installPageUrl.orEmpty() }
+            if (target.isNotBlank()) BrowserUtil.browse(target)
         }
 
         val info = JPanel().apply {
@@ -129,6 +137,7 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
 
     fun clear() {
         currentResult = null
+        activeQrUrl = ""
         isVisible = false
         qrLabel.icon = null
         qrLabel.text = " "
@@ -163,5 +172,10 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
             })
             add(value)
         }
+    }
+
+    companion object {
+        /** Display size for the success QR (larger than the previous 160px). */
+        const val QR_DISPLAY_SIZE = 280
     }
 }
