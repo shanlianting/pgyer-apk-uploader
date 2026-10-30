@@ -49,7 +49,7 @@
 > 原因几乎都是用 **JDK 24+** 跑 **Gradle 8.x**，或 Plugin / Gradle 版本不匹配。  
 > 处理：安装 JDK 21，并让 IDE 的 **Gradle JVM** 指向它；或设置  
 > `export JAVA_HOME=$(/usr/libexec/java_home -v 21)`（macOS）后执行 `./gradlew …`。  
-> 仓库已通过 `gradle/gradle-daemon-jvm.properties` 将 Daemon 固定为 **toolchain 21**。
+> 仓库已通过 `gradle/gradle-daemon-jvm.properties` 将 Daemon 固定为 **Temurin 21**，并为 macOS（含 Intel x86_64）、Linux、Windows 写了下载地址。本机没有 JDK 21 时 Gradle 会按该文件自动下载，而不是报 `No defined toolchain download url`。
 
 > **上传错误**：`HTTP/1.1 header parser received no bytes`  
 > 多为上传链路被对端提前关闭（旧实现用 chunked 上传 COS 时易触发）。当前版本已改为 **固定 Content-Length** 上传并自动重试；若仍失败，请检查 VPN/代理/防火墙是否放行 `pgyer.com` 与 COS 域名。
@@ -165,7 +165,7 @@ Uses Pgyer fast upload: `getCOSToken` → COS upload → poll `buildInfo`. Docs:
 > **Common failure**: `Type T not present` / `Could not create task ':test'`  
 > Almost always means **JDK 24+** is running **Gradle 8.x**, or plugin/Gradle versions are mismatched.  
 > Fix: install JDK 21 and point the IDE **Gradle JVM** at it (or set `JAVA_HOME` to JDK 21) before `./gradlew …`.  
-> This repo pins the Gradle Daemon via `gradle/gradle-daemon-jvm.properties` (`toolchainVersion=21`).
+> This repo pins the Gradle Daemon to **Temurin 21** in `gradle/gradle-daemon-jvm.properties`, including download URLs for macOS (Intel x86_64 and Apple silicon), Linux, and Windows. If JDK 21 is not installed, Gradle downloads it from those URLs instead of failing with `No defined toolchain download url`.
 
 > **Upload error**: `HTTP/1.1 header parser received no bytes`  
 > Usually the peer closed the connection early (chunked COS uploads were a common trigger). Current builds use **fixed Content-Length** uploads with retries; if it persists, check VPN/proxy/firewall access to `pgyer.com` and the COS host.
