@@ -246,7 +246,7 @@ class PgyerApiClient(
             buildType = jsonString(data, "buildType"),
             shortcutUrl = shortcut,
             installPageUrl = installPage,
-            qrCodeUrl = qrCodeUrl,
+            qrCodeUrl = InstallQrCode.imageUrl(data.get("buildQRCodeURL")?.asString, shortcut),
             buildIconUrl = iconUrl,
         )
     }

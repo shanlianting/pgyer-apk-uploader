@@ -35,9 +35,7 @@ dependencies {
     }
 
     implementation("com.google.code.gson:gson:2.11.0")
-    // Local QR fallback when Pgyer QR image download fails in the IDE JVM.
     implementation("com.google.zxing:core:3.5.3")
-    implementation("com.google.zxing:javase:3.5.3")
     testImplementation("junit:junit:4.13.2")
 }
 

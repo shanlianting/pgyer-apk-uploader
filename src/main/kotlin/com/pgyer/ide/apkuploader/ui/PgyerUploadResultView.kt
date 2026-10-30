@@ -1,12 +1,11 @@
 package com.pgyer.ide.apkuploader.ui
 
 import com.intellij.ide.BrowserUtil
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
-import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
 import com.pgyer.ide.apkuploader.PgyerBundle
+import com.pgyer.ide.apkuploader.upload.InstallQrCode
 import com.pgyer.ide.apkuploader.upload.PgyerUploadResult
 import java.awt.BorderLayout
 import java.awt.Dimension
@@ -96,27 +95,28 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
             })
         }
 
-        val qrPanel = JPanel(BorderLayout()).apply {
-            border = JBUI.Borders.emptyLeft(20)
-            preferredSize = Dimension(QR_DISPLAY_SIZE + 24, QR_DISPLAY_SIZE + 40)
-            add(JBLabel(PgyerBundle.message("result.qr"), SwingConstants.CENTER).apply {
-                font = font.deriveFont(Font.BOLD, 12f)
-                border = JBUI.Borders.emptyBottom(6)
-            }, BorderLayout.NORTH)
-            add(qrLabel, BorderLayout.CENTER)
+        val qrPanel = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            alignmentX = LEFT_ALIGNMENT
+            isOpaque = false
+            add(JBLabel(PgyerBundle.message("result.qr")).apply {
+                alignmentX = CENTER_ALIGNMENT
+            })
+            add(Box.createVerticalStrut(6))
+            add(qrLabel)
         }
+        qrLabel.alignmentX = CENTER_ALIGNMENT
 
-        val body = JPanel(BorderLayout()).apply {
-            add(info, BorderLayout.CENTER)
-            add(qrPanel, BorderLayout.EAST)
+        val body = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            add(qrPanel)
+            add(Box.createVerticalStrut(12))
+            add(info)
         }
 
         add(titleLabel, BorderLayout.NORTH)
-        add(JBScrollPane(body).apply {
-            border = JBUI.Borders.empty()
-            horizontalScrollBarPolicy = JBScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED
-            verticalScrollBarPolicy = JBScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
-        }, BorderLayout.CENTER)
+        add(body, BorderLayout.CENTER)
     }
 
     fun showResult(result: PgyerUploadResult) {
@@ -128,24 +128,11 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
         keyLabel.text = result.buildKey.ifBlank { "-" }
         urlLabel.text = "<html><a href='${result.installPageUrl}'>${result.installPageUrl.ifBlank { "-" }}</a></html>"
         openPageButton.isEnabled = result.installPageUrl.isNotBlank()
-
-        val resolvedQr = QrImageLoader.resolveQrUrl(
-            qrCodeUrl = result.qrCodeUrl,
-            shortcutUrl = result.shortcutUrl,
-            installPageUrl = result.installPageUrl,
-        )
-        activeQrUrl = resolvedQr
-        openQrButton.isEnabled = resolvedQr.isNotBlank() || result.installPageUrl.isNotBlank()
-        qrLabel.icon = null
-        qrLabel.text = if (resolvedQr.isBlank() && result.installPageUrl.isBlank()) {
-            PgyerBundle.message("result.qr.unavailable")
-        } else {
-            PgyerBundle.message("result.qr.loading")
-        }
+        openQrButton.isEnabled = result.qrCodeUrl.isNotBlank()
+        showQr(InstallQrCode.payload(result.installPageUrl, result.qrCodeUrl))
         isVisible = true
         revalidate()
         repaint()
-        loadQrAsync(result, resolvedQr)
     }
 
     fun clear() {
@@ -156,28 +143,21 @@ class PgyerUploadResultView : JPanel(BorderLayout()) {
         qrLabel.text = " "
     }
 
-    private fun loadQrAsync(result: PgyerUploadResult, resolvedQrUrl: String) {
-        if (resolvedQrUrl.isBlank() && result.installPageUrl.isBlank()) return
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val image = QrImageLoader.load(
-                qrCodeUrl = resolvedQrUrl,
-                fallbackContent = result.installPageUrl.ifBlank { resolvedQrUrl },
-                sizePx = QR_DISPLAY_SIZE,
-            )
-            ApplicationManager.getApplication().invokeLater {
-                if (currentResult !== result) return@invokeLater
-                if (image == null) {
-                    qrLabel.icon = null
-                    qrLabel.text = PgyerBundle.message("result.qr.unavailable")
-                } else {
-                    qrLabel.icon = ImageIcon(image)
-                    qrLabel.text = ""
-                }
-                qrLabel.revalidate()
-                revalidate()
-                repaint()
-            }
+    private fun showQr(payload: String) {
+        val image = InstallQrCode.encode(payload)
+        if (image == null) {
+            qrLabel.icon = null
+            qrLabel.text = PgyerBundle.message("result.qr.unavailable")
+            return
         }
+        val size = Dimension(image.width, image.height)
+        qrLabel.preferredSize = size
+        qrLabel.minimumSize = size
+        qrLabel.maximumSize = size
+        // The bitmap is already complete, so ImageIcon paints it. Scaling a
+        // downloaded image with getScaledInstance() left this label blank.
+        qrLabel.icon = ImageIcon(image)
+        qrLabel.text = null
     }
 
     private fun row(caption: String, value: JLabel): JPanel {
